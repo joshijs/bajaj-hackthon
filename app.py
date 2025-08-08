@@ -18,8 +18,10 @@ GOOGLE_API_KEY ="AIzaSyC0CXoXPpCYmFZGO_p4iw6Vo5cRb29ituQ"
 
 # Gemini setup
 genai.configure(api_key=GOOGLE_API_KEY)
-embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
+embedding_model = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    google_api_key=GOOGLE_API_KEY   # ✅ force API key instead of ADC
+)
 # ===== PDF LOADING =====
 def load_pdfs(folder_path: str) -> List[Document]:
     docs = []
@@ -86,4 +88,5 @@ def ask_question(req: QueryRequest):
         "answer": response.text,
         "sources": [d.metadata["source"] for d in docs]
     }
+
 
