@@ -14,10 +14,7 @@ from langchain.docstore.document import Document
 # ===== CONFIG =====
 PDF_FOLDER = "PDFS"
 CHROMA_DIR = "/data/chroma_db"  # Persistent disk mount on Render
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
-if not GOOGLE_API_KEY:
-    raise ValueError("❌ GOOGLE_API_KEY environment variable not set!")
+GOOGLE_API_KEY ="AIzaSyC0CXoXPpCYmFZGO_p4iw6Vo5cRb29ituQ"
 
 # Gemini setup
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -89,3 +86,4 @@ def ask_question(req: QueryRequest):
         "answer": response.text,
         "sources": [d.metadata["source"] for d in docs]
     }
+
