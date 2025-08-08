@@ -1,107 +1,101 @@
 import os
-import shutil
-import pytesseract
-from pdf2image import convert_from_path
-from PyPDF2 import PdfReader
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+import glob
+import tempfile
+from typing import List
+from fastapi import FastAPI
 from pydantic import BaseModel
-from chromadb import Client
-from chromadb.config import Settings
+
 import google.generativeai as genai
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_path
+import pytesseract
 
-# ------------ CONFIG ------------
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.docstore.document import Document
+
+# ===== CONFIG =====
 PDF_FOLDER = "PDFS"
-DB_FOLDER = "chroma_db"
-COLLECTION_NAME = "pdf_collection"
 GOOGLE_API_KEY ="AIzaSyC0CXoXPpCYmFZGO_p4iw6Vo5cRb29ituQ"
-genai.configure(api_key="AIzaSyC0CXoXPpCYmFZGO_p4iw6Vo5cRb29ituQ")
 
-# ------------ INIT FASTAPI ------------
-app = FastAPI()
+# Gemini setup
+genai.configure(api_key=GOOGLE_API_KEY)
+embedding_model = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    google_api_key=GOOGLE_API_KEY
+)
 
-# ------------ INIT CHROMA DB ------------
-if not os.path.exists(DB_FOLDER):
-    os.makedirs(DB_FOLDER)
-
-chroma_client = Client(Settings(
-    persist_directory=DB_FOLDER,
-    chroma_db_impl="duckdb+parquet"
-))
-
-collection = chroma_client.get_or_create_collection(COLLECTION_NAME)
-
-# ------------ PDF TEXT EXTRACTION (with OCR fallback) ------------
-def extract_text_with_ocr(file_path: str) -> str:
+# ===== PDF LOADING WITH OCR =====
+def extract_text_from_pdf(file_path: str) -> str:
+    """Extract text from both normal PDF text and images inside PDF using OCR."""
     reader = PdfReader(file_path)
     text = ""
 
-    for page_index, page in enumerate(reader.pages):
-        page_text = page.extract_text()
-        if page_text and page_text.strip():
-            text += page_text + "\n"
-        else:
-            images = convert_from_path(
-                file_path,
-                first_page=page_index + 1,
-                last_page=page_index + 1
-            )
-            for img in images:
-                text += pytesseract.image_to_string(img) + "\n"
-    return text
+    # 1️⃣ Extract selectable text
+    for page in reader.pages:
+        text += page.extract_text() or ""
 
-# ------------ EMBEDDING WITH GEMINI ------------
-def embed_text(text: str):
-    model = "models/text-embedding-004"
-    embedding = genai.embed_content(model=model, content=text)["embedding"]
-    return embedding
+    # 2️⃣ OCR for images in PDF
+    with tempfile.TemporaryDirectory() as temp_dir:
+        images = convert_from_path(file_path, output_folder=temp_dir)
+        for img in images:
+            text += "\n" + pytesseract.image_to_string(img)
 
-# ------------ LOAD PDFs INTO CHROMA ------------
-def load_pdfs_into_chroma():
-    collection.delete(where={})  # Clear old data
-    for filename in os.listdir(PDF_FOLDER):
-        if filename.lower().endswith(".pdf"):
-            file_path = os.path.join(PDF_FOLDER, filename)
-            text = extract_text_with_ocr(file_path)
-            if text.strip():
-                chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
-                for idx, chunk in enumerate(chunks):
-                    collection.add(
-                        documents=[chunk],
-                        embeddings=[embed_text(chunk)],
-                        ids=[f"{filename}_{idx}"]
-                    )
+    return text.strip()
 
-# ------------ API MODELS ------------
+def load_pdfs(folder_path: str) -> List[Document]:
+    docs = []
+    for file_path in glob.glob(os.path.join(folder_path, "*.pdf")):
+        text = extract_text_from_pdf(file_path)
+        if text:
+            docs.append(Document(page_content=text, metadata={"source": os.path.basename(file_path)}))
+    return docs
+
+# ===== CHROMA IN-MEMORY =====
+def build_chroma_in_memory() -> Chroma:
+    docs = load_pdfs(PDF_FOLDER)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_documents(docs)
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embedding_model,
+        persist_directory=None  # ✅ In-memory
+    )
+    return vectorstore
+
+vectorstore = build_chroma_in_memory()
+
+# ===== FASTAPI APP =====
+app = FastAPI(title="PDF RAG with OCR + Gemini (In-Memory)")
+
 class QueryRequest(BaseModel):
     question: str
+    k: int = 3
 
-# ------------ API ENDPOINTS ------------
-@app.on_event("startup")
-def startup_event():
-    load_pdfs_into_chroma()
+@app.get("/")
+def home():
+    return {"message": "PDF RAG API with OCR is running!"}
 
-@app.post("/query")
-def query_rag(req: QueryRequest):
-    results = collection.query(
-        query_embeddings=[embed_text(req.question)],
-        n_results=3
-    )
-    if not results["documents"]:
-        raise HTTPException(status_code=404, detail="No relevant documents found.")
+@app.post("/ask")
+def ask_question(req: QueryRequest):
+    docs = vectorstore.similarity_search(req.question, k=req.k)
+    context = "\n\n".join([d.page_content for d in docs])
 
-    context = "\n".join(doc for sublist in results["documents"] for doc in sublist)
+    prompt = f"""
+    You are a helpful assistant. Use the provided context to answer the question.
+    Context:
+    {context}
+
+    Question: {req.question}
+    Answer:
+    """
+
     model = genai.GenerativeModel("gemini-pro")
-    response = model.generate_content(f"Answer the question using the following context:\n{context}\nQuestion: {req.question}")
-    
-    return JSONResponse({"answer": response.text})
+    response = model.generate_content(prompt)
 
-@app.post("/reload")
-def reload_data():
-    load_pdfs_into_chroma()
-    return {"status": "PDF data reloaded"}
-
-# ------------ CLEANUP (optional) ------------
-@app.on_event("shutdown")
-def shutdown_event():
-    chroma_client.persist()
+    return {
+        "question": req.question,
+        "answer": response.text,
+        "sources": [d.metadata["source"] for d in docs]
+    }
