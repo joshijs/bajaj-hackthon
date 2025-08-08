@@ -2,7 +2,9 @@ fastapi
 uvicorn
 google-generativeai
 chromadb
-PyPDF2
+pdf2image
+pytesseract
+Pillow
 langchain
 langchain-community
 langchain-google-genai
